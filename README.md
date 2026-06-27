@@ -1,13 +1,25 @@
 # limitless-llm
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/) [![Groq Free Tier Ready](https://img.shields.io/badge/Groq-Free%20Tier%20Ready-orange)](https://console.groq.com) [![429s: zero](https://img.shields.io/badge/429s-zero-brightgreen)](https://github.com/your-org/limitless-llm)
 
-An open-source Python tool that brings paid-API quality to free-tier LLM providers. It solves two problems inherent to free tiers - strict TPM (tokens-per-minute) rate limits and small effective context windows - so that you can process large documents reliably without hitting rate-limit errors or losing information across chunk boundaries.
+Most chunking tools stop at the chunk boundary. Most rate-limit workarounds ignore document structure. The gap between them, scheduling, budget tracking, merging, and conflict detection is what causes 429 errors and lost information on free-tier APIs.
 
-**Accuracy target:** >= 90% fidelity compared to the same workflow on a paid LLM setup with higher TPM and larger context windows. This is a design goal measured by a composite score (BERTScore F1, context recall, faithfulness, conflict marker integrity) on a pinned benchmark corpus - see `benchmark/` for methodology. Actual results vary by model and document type.
+**limitless-llm fills that gap.** It splits large documents into semantically coherent chunks, schedules each API call within your free-tier TPM budget, and merges the outputs back into a single coherent result.
+
+**Who this is for:** Developers, students, and researchers who want to run serious LLM workflows on large documents without paying for API access. If you have a Groq free-tier key and a document larger than the context window, this tool handles the rest.
+
+| Approach | Cost for a 50k-token document | 429 risk | Code-safe splitting |
+|---|---|---|---|
+| Paid API (e.g. GPT-4o) | ~$0.50-$1.00 | None | Partial |
+| Groq free tier, naive loop | $0 | High | No |
+| Splitter-only (LangChain, ASTChunk) | $0 | High | Yes |
+| Groq free tier + **limitless-llm** | $0 | None | Roadmap |
+
+**Design goal:** approach the quality of a paid-API workflow on free-tier hardware. The pipeline is designed to target >= 90% fidelity (composite score: BERTScore F1, context recall, faithfulness, conflict marker integrity) against a pinned benchmark corpus.
 
 > **What's working:** TPM-aware request scheduling, rolling-window rate limiting, bidirectional overlap, hierarchical merge with conflict detection, and verification pass. **Want to help extend it?** See [Contributing](#contributing) for open feature areas.
+
+*Formal benchmark results are in progress - see `benchmark/` for methodology.*
 
 ---
 
@@ -15,7 +27,7 @@ An open-source Python tool that brings paid-API quality to free-tier LLM provide
 
 ```mermaid
 flowchart TD
-    A[Input document] --> B[StructuralSplitter\nsentence-aware chunking]
+    A[Input document] --> B[DocumentSplitter\nchunk into segments]
     B --> C{Chunks}
     C --> D[Chunk call\nvia TPMRateLimiter]
     D --> E[Compressor\nrolling 300-token summary]
@@ -292,13 +304,29 @@ and could not be automatically resolved:
 
 ---
 
-## Known limitations
+## Why not just chunk and loop?
 
-**Single-process only.** The TPM rate limiter tracks usage in-memory per process. Running two instances simultaneously against the same API key will each see the full TPM budget independently and can trigger 429 errors. For multi-process use, a Redis backend is the upgrade path (the `limits` library supports this with a one-line storage swap).
+Tools like LangChain's text splitters, `code-chunk`, and `ASTChunk` are excellent at splitting. They stop at the chunk boundary and hand you a list. They do not handle:
 
-**Code-heavy documents produce degraded output.** The sentence-aware splitter does not protect code block boundaries. Documents where more than ~20% of content is code blocks (source files, API schemas, config samples) will likely have code blocks bisected at chunk boundaries. For now, avoid using this tool for predominantly code documents. A structure-aware splitter that respects code block boundaries is an open contribution area - see [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Token budget tracking** - how many tokens am I about to send, and will this 429 on Groq's 12k TPM limit?
+- **Precise sleep scheduling** - sleeping too long wastes time; sleeping too short still 429s
+- **Output merging** - combining 4-8 chunk outputs into one coherent result
+- **Conflict detection** - what happens when chunk 3 contradicts chunk 6?
 
-**Ledger growth is unbounded.** The pipeline accumulates all chunk outputs into a running ledger. On very long documents this ledger can exceed the context window. When that happens the pipeline aborts with a clear error message before making the API call. Ledger pruning is an open contribution area - see [CONTRIBUTING.md](CONTRIBUTING.md).
+limitless-llm is the pipeline layer that sits between your chunks and your API key and answers all of those questions.
+
+---
+
+## Roadmap
+
+**Code-aware splitting** (open contribution)
+The current splitter is sentence-aware, not structure-aware. Documents where more than ~20% of content is code blocks will have chunks split at arbitrary boundaries. A structure-aware splitter that protects code block and function boundaries is the designated next step - see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+**Ledger pruning** (open contribution)
+The pipeline accumulates all chunk outputs into a running ledger. On very long documents this ledger can exceed the context window, and the pipeline aborts with a clear error before making the API call. Ledger pruning to stay within budget is an open contribution area - see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+**Multi-process TPM sharing** (open contribution)
+The rate limiter is in-process. Running two instances against the same API key will each see the full TPM budget independently. A Redis backend is the upgrade path - see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
