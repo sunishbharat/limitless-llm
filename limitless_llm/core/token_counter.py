@@ -27,41 +27,43 @@ class _RegistryEntry:
 # Model registry. Update `last_verified` whenever provider limits are confirmed.
 # Context windows and TPM limits are separate concerns - do not confuse them.
 _REGISTRY: dict[str, _RegistryEntry] = {
-    # last verified: 2025-06-27
+    # last verified: 2026-06-27 (Groq free plan; TPM confirmed 12,000)
     "groq/llama-3.3-70b-versatile": _RegistryEntry(
         context_window=128_000,
         tpm_limit=12_000,
-        last_verified=datetime.date(2025, 6, 27),
+        last_verified=datetime.date(2026, 6, 27),
     ),
-    # last verified: 2025-06-27
+    # last verified: 2026-06-27 (Groq free plan; TPM corrected from 20,000 to 6,000)
     "groq/llama-3.1-8b-instant": _RegistryEntry(
         context_window=128_000,
-        tpm_limit=20_000,
-        last_verified=datetime.date(2025, 6, 27),
+        tpm_limit=6_000,
+        last_verified=datetime.date(2026, 6, 27),
     ),
-    # last verified: 2025-06-27
+    # last verified: 2025-06-27 (groq/llama3-70b-8192 no longer listed on Groq free plan
+    # as of 2026-06-27 - may be deprecated. Keeping entry with conservative fallback TPM
+    # to avoid breaking existing configs; verify before relying on this model.)
     "groq/llama3-70b-8192": _RegistryEntry(
         context_window=8_192,
-        tpm_limit=12_000,
+        tpm_limit=6_000,
         last_verified=datetime.date(2025, 6, 27),
     ),
-    # last verified: 2025-06-27
+    # last verified: 2026-06-27
     "openai/gpt-4o": _RegistryEntry(
         context_window=128_000,
         tpm_limit=None,
-        last_verified=datetime.date(2025, 6, 27),
+        last_verified=datetime.date(2026, 6, 27),
     ),
-    # last verified: 2025-06-27
+    # last verified: 2026-06-27
     "ollama/llama3.2": _RegistryEntry(
         context_window=32_768,
         tpm_limit=None,
-        last_verified=datetime.date(2025, 6, 27),
+        last_verified=datetime.date(2026, 6, 27),
     ),
-    # last verified: 2025-06-27
+    # last verified: 2026-06-27
     "openai/minimax-m3": _RegistryEntry(
         context_window=40_960,
         tpm_limit=None,
-        last_verified=datetime.date(2025, 6, 27),
+        last_verified=datetime.date(2026, 6, 27),
     ),
 }
 

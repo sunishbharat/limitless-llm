@@ -63,6 +63,17 @@ class TPMRateLimiter:
                 if current + estimated_tokens <= self.tpm_limit:
                     break
 
+                # If the window is empty but estimated_tokens still exceeds the limit,
+                # a single call's cost exceeds the TPM ceiling - nothing to wait for.
+                # Proceed and let the 429 retry path handle it if the API rejects.
+                if not self._log:
+                    log.warning(
+                        "tpm_single_call_exceeds_limit",
+                        estimated_tokens=estimated_tokens,
+                        tpm_limit=self.tpm_limit,
+                    )
+                    break
+
                 # Find the oldest entry; sleep until it exits the window.
                 oldest_ts = min(e.timestamp for e in self._log)
                 window_exit_at = oldest_ts + _WINDOW_SECONDS
