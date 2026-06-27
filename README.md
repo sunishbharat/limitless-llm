@@ -1,2 +1,336 @@
 # limitless-llm
-An open-source tool that helps users get more out of free-tier LLM APIs by managing TPM limits, chunking large documents, and merging outputs with high fidelity.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+
+An open-source Python tool that brings paid-API quality to free-tier LLM providers. It solves two problems inherent to free tiers - strict TPM (tokens-per-minute) rate limits and small effective context windows - so that you can process large documents reliably without hitting rate-limit errors or losing information across chunk boundaries.
+
+**Accuracy target:** >= 90% fidelity compared to the same workflow on a paid LLM setup with higher TPM and larger context windows. This is a design goal measured by a composite score (BERTScore F1, context recall, faithfulness, conflict marker integrity) on a pinned benchmark corpus - see `benchmark/` for methodology. Actual results vary by model and document type.
+
+> **What's working:** TPM-aware request scheduling, rolling-window rate limiting, bidirectional overlap, hierarchical merge with conflict detection, and verification pass. **Want to help extend it?** See [Contributing](#contributing) for open feature areas.
+
+---
+
+## How it works
+
+```mermaid
+flowchart TD
+    A[Input document] --> B[StructuralSplitter\nsentence-aware chunking]
+    B --> C{Chunks}
+    C --> D[Chunk call\nvia TPMRateLimiter]
+    D --> E[Compressor\nrolling 300-token summary]
+    E --> D
+    D --> F[Chunk outputs]
+    F --> G[HierarchicalMerge\nbalanced binary tree]
+    G --> H[VerificationPass]
+    H --> I[Final output\nwith conflict markers]
+
+    subgraph Rate control
+        D
+    end
+```
+
+The rate limiter uses a rolling 60-second window. It measures actual input tokens before each call, reserves budget atomically, and records actual usage after. This eliminates 429 errors without fixed sleeps.
+
+---
+
+## Requirements
+
+- Python 3.11+
+- [uv](https://github.com/astral-sh/uv) (recommended) or pip
+- Any Free Tier API key for your chosen provider (Groq, OpenAI, etc.)
+
+---
+
+## Installation
+
+```bash
+git clone https://github.com/your-org/limitless-llm.git
+cd limitless-llm
+uv sync
+```
+
+To install as a CLI tool globally:
+
+```bash
+uv pip install -e .
+```
+
+---
+
+## API key setup
+
+Set the appropriate environment variable for your provider before running:
+
+| Provider | Environment variable |
+|---|---|
+| Groq | `GROQ_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` |
+| Ollama (local) | No key required |
+
+```bash
+export GROQ_API_KEY=your_key_here
+```
+
+---
+
+## Quick start
+
+Process a document file and print the result to stdout:
+
+```bash
+uv run limitless-llm run my_document.txt
+```
+
+Save the output to a file:
+
+```bash
+uv run limitless-llm run my_document.txt --output result.txt
+```
+
+Use a different model:
+
+```bash
+uv run limitless-llm run my_document.txt --model groq/llama-3.1-8b-instant
+```
+
+Use a smaller chunk size for dense or symbol-heavy documents:
+
+```bash
+uv run limitless-llm run my_document.txt --chunk-size 3000
+```
+
+---
+
+## Programmatic use case: reviewing a large document
+
+The CLI wraps a single call. To integrate the pipeline into your own application - for example, reading a large spec into the library and getting back a single coherent review - use the Python API.
+
+### Minimal example
+
+```python
+import asyncio
+from limitless_llm import PipelineFactory
+from limitless_llm.models.config import ModelConfig, PipelineConfig
+
+config = PipelineConfig(
+    model=ModelConfig(model="groq/llama-3.3-70b-versatile"),
+    input_text=open("my_document.txt").read(),
+)
+result = asyncio.run(PipelineFactory.build(config).run())
+print(result)
+```
+
+### Install
+
+```bash
+uv add limitless-llm
+```
+
+Set your provider key before running:
+
+```bash
+export GROQ_API_KEY=your_groq_key_here
+```
+
+### Recipe: review a huge document on free-tier Groq
+
+```python
+# review.py
+import asyncio
+import pathlib
+
+from limitless_llm import PipelineFactory
+from limitless_llm.models.config import ModelConfig, PipelineConfig
+
+
+REVIEW_SYSTEM_PROMPT = (
+    "You are a senior technical reviewer. Read each section of the document carefully "
+    "and produce a structured review covering: correctness, risks, ambiguities, and "
+    "concrete suggestions. Be specific and quote line ranges when relevant."
+)
+
+REVIEW_CHUNK_TEMPLATE = """\
+Review the following document section in the context of everything reviewed so far.
+
+{compressed_summary}{tail}DOCUMENT SECTION:
+{chunk}
+
+FACTS LEDGER SO FAR:
+{ledger}
+
+Produce the review of THIS section only. Do not repeat earlier sections.
+"""
+
+
+async def review_document(document_text: str) -> str:
+    config = PipelineConfig(
+        model=ModelConfig(
+            model="groq/llama-3.3-70b-versatile",
+            max_output_tokens=1500,
+            baseline_chunk_size=6000,
+        ),
+        input_text=document_text,
+        system_prompt=REVIEW_SYSTEM_PROMPT,
+        chunk_prompt_template=REVIEW_CHUNK_TEMPLATE,
+    )
+    runner = PipelineFactory.build(config)
+    return await runner.run()
+
+
+if __name__ == "__main__":
+    text = pathlib.Path("big_spec.pdf").read_text(encoding="utf-8")
+    review = asyncio.run(review_document(text))
+    pathlib.Path("review.md").write_text(review, encoding="utf-8")
+    print(f"Review written: {len(review):,} chars")
+```
+
+Run with `uv run python review.py`.
+
+### What you get back
+
+The returned string is the hierarchical merge of every chunk review, plus a conflict-marker section and a verification report:
+
+- **chunked reviews** - one per ~6,000-token slice, merged in a balanced binary tree, so a 20k-token document is ~4 chunks plus 1 merge instead of one giant prompt that triggers 429s
+- **bidirectional overlap** - each chunk sees a 200-token tail of the previous section plus a rolling 300-token compressed summary, so defined terms and forward references survive across chunk boundaries
+- **no 429s** - the rolling-window TPM limiter reserves budget before each call and records actuals after; `retry-after` is honoured on the rare 429 that still slips through
+- **`[CONFLICT: ...]` markers** preserved verbatim and collected in a `## Conflicts Requiring Human Review` section at the end
+- **verification report** appended after the merge
+
+### Knobs you may want to tune
+
+| Want | Change |
+|---|---|
+| Higher free-tier TPM allowance (20k vs 12k) | `model="groq/llama-3.1-8b-instant"` |
+| Bigger context, paid API (no TPM cap) | `model="openai/gpt-4o"` (limiter becomes a no-op) |
+| Smaller chunks for very dense or symbolic documents | `baseline_chunk_size=3000` |
+| Longer per-call output | `max_output_tokens=2000` |
+| Your own review checklist | edit `REVIEW_SYSTEM_PROMPT` and `REVIEW_CHUNK_TEMPLATE` |
+
+### Honest wall-clock cost
+
+For a 20,000-token document on the default Groq free tier, expect ~9 LLM calls (4 chunks + 4 compressions + 1 merge) at roughly 1.25 calls per minute TPM-saturated, so ~3-4 minutes end-to-end. That is the free-tier tradeoff; the point of this library is making it **reliable** (zero 429s) rather than fast. Single-process only - if you run two of these concurrently against the same key, they will not share TPM state and you can 429 again.
+
+---
+
+## CLI reference
+
+### `limitless-llm run`
+
+Process a document through the TPM-aware pipeline.
+
+```
+Usage: limitless-llm run [OPTIONS] INPUT_FILE
+
+Arguments:
+  INPUT_FILE  Path to the input document  [required]
+
+Options:
+  -m, --model TEXT              LiteLLM model identifier
+                                [default: groq/llama-3.3-70b-versatile]
+  --max-output-tokens INTEGER   Maximum tokens per LLM output call [default: 1500]
+  --chunk-size INTEGER          Baseline chunk size in tokens [default: 6000]
+  -o, --output PATH             Write output to this file instead of stdout
+  --help                        Show this message and exit
+```
+
+### `limitless-llm refresh-limits`
+
+Audit the model registry for stale entries and report their age. Exits with a non-zero code if any entry is older than 90 days.
+
+```bash
+uv run limitless-llm refresh-limits
+```
+
+---
+
+## Supported models
+
+| Model | Context window | Free-tier TPM | Notes |
+|---|---|---|---|
+| `groq/llama-3.3-70b-versatile` | 128,000 | 12,000 | Default model |
+| `groq/llama-3.1-8b-instant` | 128,000 | 20,000 | Higher TPM allowance |
+| `groq/llama3-70b-8192` | 8,192 | 12,000 | Genuinely 8k window |
+| `openai/gpt-4o` | 128,000 | Unlimited | Paid API - no rate limiting |
+| `ollama/llama3.2` | 32,768 | Unlimited | Local - no network limit |
+| `openai/minimax-m3` | 40,960 | Unlimited | Paid API |
+
+Unknown models fall back to `context_window=8,192` and `tpm_limit=6,000`.
+
+---
+
+## Output format
+
+The pipeline appends two optional sections to the merged output:
+
+**Conflict markers** - when chunk outputs contain contradictory facts:
+
+```
+[CONFLICT: left says "March 15", right says "April 1" - preserved for human review]
+```
+
+A structured summary of all conflicts is appended at the end:
+
+```
+## Conflicts Requiring Human Review
+
+The following contradictions were detected across document sections
+and could not be automatically resolved:
+
+1. [CONFLICT: left says "March 15", right says "April 1" - preserved for human review]
+```
+
+**Verification report** - a brief LLM-generated check comparing the merged output against the accumulated fact ledger:
+
+```
+---
+
+## Verification Report
+
+...
+```
+
+---
+
+## Known limitations
+
+**Single-process only.** The TPM rate limiter tracks usage in-memory per process. Running two instances simultaneously against the same API key will each see the full TPM budget independently and can trigger 429 errors. For multi-process use, a Redis backend is the upgrade path (the `limits` library supports this with a one-line storage swap).
+
+**Code-heavy documents produce degraded output.** The sentence-aware splitter does not protect code block boundaries. Documents where more than ~20% of content is code blocks (source files, API schemas, config samples) will likely have code blocks bisected at chunk boundaries. For now, avoid using this tool for predominantly code documents. A structure-aware splitter that respects code block boundaries is an open contribution area - see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+**Ledger growth is unbounded.** The pipeline accumulates all chunk outputs into a running ledger. On very long documents this ledger can exceed the context window. When that happens the pipeline aborts with a clear error message before making the API call. Ledger pruning is an open contribution area - see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+## Wall-clock time expectations
+
+Free-tier APIs are rate-limited. Processing is reliable but slow. Example for a 20,000-token document on `groq/llama-3.3-70b-versatile` (12,000 TPM free tier):
+
+- ~4 chunk calls + ~4 compression calls + ~1 merge call = ~9 total LLM calls
+- At TPM saturation: approximately 3-4 minutes end-to-end
+
+This is the honest tradeoff of the free tier. The rate limiter makes it reliable rather than crashy.
+
+---
+
+## Contributing
+
+Bug reports and pull requests are welcome. Please open an issue first to discuss significant changes. See [CONTRIBUTING.md](CONTRIBUTING.md) for open feature areas and contribution guidelines.
+
+---
+
+## License
+
+MIT - see [LICENSE](LICENSE).
+
+---
+
+## Local development
+
+```bash
+uv sync                                   # install all dependencies including dev
+uv run ruff check limitless_llm/          # lint
+uv run ruff format --check limitless_llm/ # format check
+uv run mypy --strict limitless_llm/       # type check
+uv run python -m pytest                   # run tests
+```

@@ -1,0 +1,19 @@
+# Markdown - ignore all, keep only README and tracked runtime assets
+docs/
+*.md
+!README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+htmlcov/
+
+# Ignore all dotfiles and dot-directories by default
+.*
+!.gitignore
+!.python-version
+!.env.example
+!.github/
+!.dockerignore
+!CONTRIBUTING.md

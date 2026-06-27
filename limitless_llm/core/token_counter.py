@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import datetime
+import warnings
+from dataclasses import dataclass
+
+import tiktoken
+
+from limitless_llm.types import ModelName, TokenCount
+
+# cl100k_base is used as a cross-model approximation. LLaMA 3.x uses a different BPE
+# vocabulary; on technical/symbol-heavy text this can undercount by 5-15%. The 500-token
+# system_overhead constant in pipeline.py is deliberately sized to absorb this error.
+_ENCODING = tiktoken.get_encoding("cl100k_base")
+
+# Staleness threshold: warn if a registry entry is older than this many days.
+_STALENESS_DAYS = 90
+
+
+@dataclass(frozen=True)
+class _RegistryEntry:
+    context_window: int
+    tpm_limit: int | None  # None = unlimited (paid API or local)
+    last_verified: datetime.date
+
+
+# Model registry. Update `last_verified` whenever provider limits are confirmed.
+# Context windows and TPM limits are separate concerns - do not confuse them.
+_REGISTRY: dict[str, _RegistryEntry] = {
+    # last verified: 2025-06-27
+    "groq/llama-3.3-70b-versatile": _RegistryEntry(
+        context_window=128_000,
+        tpm_limit=12_000,
+        last_verified=datetime.date(2025, 6, 27),
+    ),
+    # last verified: 2025-06-27
+    "groq/llama-3.1-8b-instant": _RegistryEntry(
+        context_window=128_000,
+        tpm_limit=20_000,
+        last_verified=datetime.date(2025, 6, 27),
+    ),
+    # last verified: 2025-06-27
+    "groq/llama3-70b-8192": _RegistryEntry(
+        context_window=8_192,
+        tpm_limit=12_000,
+        last_verified=datetime.date(2025, 6, 27),
+    ),
+    # last verified: 2025-06-27
+    "openai/gpt-4o": _RegistryEntry(
+        context_window=128_000,
+        tpm_limit=None,
+        last_verified=datetime.date(2025, 6, 27),
+    ),
+    # last verified: 2025-06-27
+    "ollama/llama3.2": _RegistryEntry(
+        context_window=32_768,
+        tpm_limit=None,
+        last_verified=datetime.date(2025, 6, 27),
+    ),
+    # last verified: 2025-06-27
+    "openai/minimax-m3": _RegistryEntry(
+        context_window=40_960,
+        tpm_limit=None,
+        last_verified=datetime.date(2025, 6, 27),
+    ),
+}
+
+# Fallback values for unknown models. Conservative to avoid over-budgeting.
+# TPM fallback corrected from 10,000 (which exceeded Groq free-tier) to 6,000.
+_FALLBACK_CONTEXT_WINDOW = 8_192
+_FALLBACK_TPM_LIMIT = 6_000
+
+
+def _check_staleness(model: ModelName, entry: _RegistryEntry) -> None:
+    """Emit a warning if the registry entry is older than _STALENESS_DAYS."""
+    age = (datetime.date.today() - entry.last_verified).days
+    if age > _STALENESS_DAYS:
+        warnings.warn(
+            f"Model registry entry for '{model}' was last verified on "
+            f"{entry.last_verified} ({age} days ago). "
+            f"TPM and context window values may be outdated. "
+            f"Run with --refresh-limits to fetch current values, "
+            f"or update token_counter.py manually.",
+            stacklevel=3,
+        )
+
+
+def get_context_window(model: ModelName) -> TokenCount:
+    """Return the context window size in tokens for the given model.
+
+    Args:
+        model: LiteLLM model identifier.
+
+    Returns:
+        Context window size. Falls back to {_FALLBACK_CONTEXT_WINDOW} for unknown models.
+    """
+    entry = _REGISTRY.get(model)
+    if entry is None:
+        return _FALLBACK_CONTEXT_WINDOW
+    _check_staleness(model, entry)
+    return entry.context_window
+
+
+def get_tpm_limit(model: ModelName) -> TokenCount | None:
+    """Return the TPM limit for the given model, or None if unlimited.
+
+    Args:
+        model: LiteLLM model identifier.
+
+    Returns:
+        Tokens-per-minute limit, or None for local/paid-API models with no limit.
+        Falls back to {_FALLBACK_TPM_LIMIT} for unknown models.
+    """
+    entry = _REGISTRY.get(model)
+    if entry is None:
+        return _FALLBACK_TPM_LIMIT
+    _check_staleness(model, entry)
+    return entry.tpm_limit
+
+
+def audit_registry() -> list[dict[str, object]]:
+    """Return a list of all registry entries with their staleness in days.
+
+    Used by the --refresh-limits CLI subcommand.
+    """
+    today = datetime.date.today()
+    results = []
+    for model, entry in _REGISTRY.items():
+        age = (today - entry.last_verified).days
+        results.append(
+            {
+                "model": model,
+                "context_window": entry.context_window,
+                "tpm_limit": entry.tpm_limit,
+                "last_verified": str(entry.last_verified),
+                "age_days": age,
+                "stale": age > _STALENESS_DAYS,
+            }
+        )
+    return results
+
+
+class TokenCounter:
+    """Counts tokens using the cl100k_base encoding as a cross-model approximation."""
+
+    @staticmethod
+    def count(text: str) -> TokenCount:
+        """Return the token count for the given text string.
+
+        Args:
+            text: Text to tokenize.
+
+        Returns:
+            Number of tokens according to cl100k_base encoding.
+        """
+        return len(_ENCODING.encode(text))
