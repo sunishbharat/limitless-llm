@@ -1,6 +1,6 @@
 # limitless-llm
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/) [![Groq Free Tier Ready](https://img.shields.io/badge/Groq-Free%20Tier%20Ready-orange)](https://console.groq.com) [![429s: zero](https://img.shields.io/badge/429s-zero-brightgreen)](https://github.com/your-org/limitless-llm)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/) [![Groq Free Tier Ready](https://img.shields.io/badge/Groq-Free%20Tier%20Ready-orange)](https://console.groq.com) [![429s: zero](https://img.shields.io/badge/429s-zero-brightgreen)](https://github.com/sunishbharat/limitless-llm)
 
 Most chunking tools stop at the chunk boundary. Most rate-limit workarounds ignore document structure. The gap between them, scheduling, budget tracking, merging, and conflict detection is what causes 429 errors and lost information on free-tier APIs.
 
@@ -57,7 +57,7 @@ The rate limiter uses a rolling 60-second window. It measures actual input token
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/limitless-llm.git
+git clone https://github.com/sunishbharat/limitless-llm.git
 cd limitless-llm
 uv sync
 ```
