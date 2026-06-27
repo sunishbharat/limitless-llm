@@ -201,13 +201,13 @@ Run with `uv run python review.py`.
 
 ### What you get back
 
-The returned string is the hierarchical merge of every chunk review, plus a conflict-marker section and a verification report:
+The returned string is the hierarchical merge of every chunk review. By default it also includes two analysis sections, both of which can be suppressed independently:
 
 - **chunked reviews** - one per ~6,000-token slice, merged in a balanced binary tree, so a 20k-token document is ~4 chunks plus 1 merge instead of one giant prompt that triggers 429s
 - **bidirectional overlap** - each chunk sees a 200-token tail of the previous section plus a rolling 300-token compressed summary, so defined terms and forward references survive across chunk boundaries
 - **no 429s** - the rolling-window TPM limiter reserves budget before each call and records actuals after; `retry-after` is honoured on the rare 429 that still slips through
-- **`[CONFLICT: ...]` markers** preserved verbatim and collected in a `## Conflicts Requiring Human Review` section at the end
-- **verification report** appended after the merge
+- **`[CONFLICT: ...]` markers** preserved verbatim and collected in a `## Conflicts Requiring Human Review` section at the end (suppress with `include_conflict_summary=False`)
+- **verification report** appended after the merge - costs one extra LLM call against TPM budget (suppress with `include_verification_report=False`)
 
 ### Knobs you may want to tune
 
@@ -218,6 +218,9 @@ The returned string is the hierarchical merge of every chunk review, plus a conf
 | Smaller chunks for very dense or symbolic documents | `baseline_chunk_size=3000` |
 | Longer per-call output | `max_output_tokens=2000` |
 | Your own review checklist | edit `REVIEW_SYSTEM_PROMPT` and `REVIEW_CHUNK_TEMPLATE` |
+| Clean output with no appended sections (no verification, no conflict summary) | `include_conflict_summary=False, include_verification_report=False` |
+| Clean output but still run verification | `include_conflict_summary=False` |
+| Skip the verification LLM call to save TPM budget | `include_verification_report=False` |
 
 ### Honest wall-clock cost
 
@@ -273,15 +276,15 @@ Unknown models fall back to `context_window=8,192` and `tpm_limit=6,000`.
 
 ## Output format
 
-The pipeline appends two optional sections to the merged output:
+Both analysis sections are **on by default** and **independently controllable** via `PipelineConfig` flags.
 
-**Conflict markers** - when chunk outputs contain contradictory facts:
+**Conflict markers** - when chunk outputs contain contradictory facts, inline markers are preserved verbatim:
 
 ```
 [CONFLICT: left says "March 15", right says "April 1" - preserved for human review]
 ```
 
-A structured summary of all conflicts is appended at the end:
+When `include_conflict_summary=True` (default), a structured summary is appended at the end:
 
 ```
 ## Conflicts Requiring Human Review
@@ -292,7 +295,9 @@ and could not be automatically resolved:
 1. [CONFLICT: left says "March 15", right says "April 1" - preserved for human review]
 ```
 
-**Verification report** - a brief LLM-generated check comparing the merged output against the accumulated fact ledger:
+Set `include_conflict_summary=False` to omit this section. Note: inline `[CONFLICT: ...]` markers remain in the merged text regardless - only the summary section is suppressed.
+
+**Verification report** - a brief LLM-generated check comparing the merged output against the accumulated fact ledger. Controlled by `include_verification_report` (default `True`):
 
 ```
 ---
@@ -301,6 +306,17 @@ and could not be automatically resolved:
 
 ...
 ```
+
+Setting `include_verification_report=False` skips the verification LLM call entirely, not just the section. The verification call sends `ledger + merged_output` plus prompt overhead and `max_output_tokens`, so on a typical 20k-token document it consumes roughly 6,000-12,000 TPM tokens - significantly more than a single chunk call (the 2,100-token figure elsewhere in the docs refers to the per-chunk *compression* call, not verification).
+
+**Choosing flags by workflow:**
+
+| Workflow | `include_conflict_summary` | `include_verification_report` |
+|---|---|---|
+| Review mode - full analysis | `True` (default) | `True` (default) |
+| Write/fix mode - clean output, still verified | `False` | `True` |
+| Fast review - skip verification call | `True` | `False` |
+| Generate clean output with no verification | `False` | `False` |
 
 ---
 

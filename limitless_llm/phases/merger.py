@@ -85,6 +85,8 @@ class HierarchicalMerge:
         rate_limiter: TPMRateLimiter,
         model: str,
         max_output_tokens: TokenCount,
+        *,
+        include_conflict_summary: bool = True,
     ) -> None:
         if rate_limiter is None:
             raise ValueError("rate_limiter is required")
@@ -93,6 +95,7 @@ class HierarchicalMerge:
         self._model = model
         self._max_output_tokens = max_output_tokens
         self._context_window = get_context_window(model)
+        self._include_conflict_summary = include_conflict_summary
 
     async def merge(self, chunk_outputs: list[str]) -> str:
         """Reduce chunk_outputs to a single merged string.
@@ -125,7 +128,9 @@ class HierarchicalMerge:
             tree_level += 1
 
         final = level[0]
-        return self._append_conflict_summary(final)
+        if self._include_conflict_summary:
+            return self._append_conflict_summary(final)
+        return final
 
     async def _merge_two(self, left: str, right: str, tree_level: int, pair_index: int) -> str:
         left_tokens = TokenCounter.count(left)

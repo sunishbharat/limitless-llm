@@ -50,3 +50,19 @@ class PipelineConfig(BaseModel):
         ),
         description="Chunk template; placeholders: {compressed_summary}, {tail}, {chunk}, {ledger}",
     )
+    include_conflict_summary: bool = Field(
+        default=True,
+        description=(
+            "Append '## Conflicts Requiring Human Review' to the merged output when conflict "
+            "markers are present. Set False for write/generation workflows that need clean output."
+        ),
+    )
+    include_verification_report: bool = Field(
+        default=True,
+        description=(
+            "Run the VerificationPass LLM call and append '## Verification Report' to the "
+            "output. Despite the name, setting False skips the verification LLM call itself - "
+            "not just the appended section - preserving TPM budget (~6,000-12,000 tokens on a "
+            "typical 20k-token document)."
+        ),
+    )

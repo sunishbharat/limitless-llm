@@ -102,6 +102,7 @@ async def run_with_chunking_if_needed(
         rate_limiter=rate_limiter,
         model=model_name,
         max_output_tokens=max_output_tokens,
+        include_conflict_summary=config.include_conflict_summary,
     )
     verifier = VerificationPass(
         backend=_backend,
@@ -180,12 +181,23 @@ async def run_with_chunking_if_needed(
     merged = await merger.merge(chunk_outputs)
 
     structlog.contextvars.bind_contextvars(phase="verification")
-    try:
-        verification_report = await verifier.verify(merged, ledger)
-        log.info("verification_done")
-        final = merged + "\n\n---\n\n## Verification Report\n\n" + verification_report
-    except Exception as exc:
-        log.error("verification_failed", error=str(exc))
+    # Read include_verification_report directly from config here rather than forwarding
+    # it to the VerificationPass constructor: the orchestrator owns the call-vs-skip
+    # decision so the TPM budget is preserved *before* any work is done. (The
+    # complementary include_conflict_summary flag is forwarded to HierarchicalMerge
+    # because the conflict summary is a string scan appended after the merge tree -
+    # no LLM call, no TPM cost - and the merge component already needs to know the
+    # decision when it runs.)
+    if config.include_verification_report:
+        try:
+            verification_report = await verifier.verify(merged, ledger)
+            log.info("verification_done")
+            final = merged + "\n\n---\n\n## Verification Report\n\n" + verification_report
+        except Exception as exc:
+            log.error("verification_failed", error=str(exc))
+            final = merged
+    else:
+        log.info("verification_skipped")
         final = merged
 
     structlog.contextvars.clear_contextvars()
