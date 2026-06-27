@@ -66,3 +66,11 @@ class PipelineConfig(BaseModel):
             "typical 20k-token document)."
         ),
     )
+    verbose: bool = Field(
+        default=False,
+        description=(
+            "Emit debug/info/warning pipeline logs. When False (default), only errors are "
+            "logged. Set True to see chunk-by-chunk progress, TPM reservations, and retry "
+            "details."
+        ),
+    )

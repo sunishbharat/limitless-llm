@@ -45,7 +45,7 @@ _REGISTRY: dict[str, _RegistryEntry] = {
     "groq/llama3-70b-8192": _RegistryEntry(
         context_window=8_192,
         tpm_limit=6_000,
-        last_verified=datetime.date(2025, 6, 27),
+        last_verified=datetime.date(2026, 6, 27),
     ),
     # last verified: 2026-06-27
     "openai/gpt-4o": _RegistryEntry(

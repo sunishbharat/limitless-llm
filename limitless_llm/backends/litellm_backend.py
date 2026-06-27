@@ -5,6 +5,8 @@ from typing import Any
 
 import litellm
 import structlog
+
+litellm.suppress_debug_info = True
 import tenacity
 
 from limitless_llm.core.rate_limiter import TPMRateLimiter

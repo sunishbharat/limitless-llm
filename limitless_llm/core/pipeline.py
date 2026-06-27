@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging as _logging
 from typing import cast
 
 import structlog
@@ -82,6 +83,10 @@ async def run_with_chunking_if_needed(
     Returns:
         Final merged output string.
     """
+    _logging.getLogger("limitless_llm").setLevel(
+        _logging.DEBUG if config.verbose else _logging.ERROR
+    )
+
     model_name = config.model.model
     max_output_tokens = config.model.max_output_tokens
     baseline_chunk_size = config.model.baseline_chunk_size

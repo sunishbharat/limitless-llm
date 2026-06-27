@@ -213,14 +213,15 @@ The returned string is the hierarchical merge of every chunk review. By default 
 
 | Want | Change |
 |---|---|
-| Higher free-tier TPM allowance (20k vs 12k) | `model="groq/llama-3.1-8b-instant"` |
 | Bigger context, paid API (no TPM cap) | `model="openai/gpt-4o"` (limiter becomes a no-op) |
+| Use `llama-3.1-8b-instant` (6k TPM - lower than 70b) | also set `baseline_chunk_size=3500` or request exceeds the limit |
 | Smaller chunks for very dense or symbolic documents | `baseline_chunk_size=3000` |
 | Longer per-call output | `max_output_tokens=2000` |
 | Your own review checklist | edit `REVIEW_SYSTEM_PROMPT` and `REVIEW_CHUNK_TEMPLATE` |
 | Clean output with no appended sections (no verification, no conflict summary) | `include_conflict_summary=False, include_verification_report=False` |
 | Clean output but still run verification | `include_conflict_summary=False` |
 | Skip the verification LLM call to save TPM budget | `include_verification_report=False` |
+| See chunk-by-chunk progress, TPM reservations, and retry logs | `verbose=True` |
 
 ### Honest wall-clock cost
 
@@ -263,9 +264,9 @@ uv run limitless-llm refresh-limits
 
 | Model | Context window | Free-tier TPM | Notes |
 |---|---|---|---|
-| `groq/llama-3.3-70b-versatile` | 128,000 | 12,000 | Default model |
-| `groq/llama-3.1-8b-instant` | 128,000 | 20,000 | Higher TPM allowance |
-| `groq/llama3-70b-8192` | 8,192 | 12,000 | Genuinely 8k window |
+| `groq/llama-3.3-70b-versatile` | 128,000 | 12,000 | Default model. Last verified 2026-06-27 |
+| `groq/llama-3.1-8b-instant` | 128,000 | 6,000 | Lower TPM than 70b - use `baseline_chunk_size=3500`. Last verified 2026-06-27 |
+| `groq/llama3-70b-8192` | 8,192 | 6,000 | No longer listed on Groq free plan as of 2026-06-27 - may be deprecated |
 | `openai/gpt-4o` | 128,000 | Unlimited | Paid API - no rate limiting |
 | `ollama/llama3.2` | 32,768 | Unlimited | Local - no network limit |
 | `openai/minimax-m3` | 40,960 | Unlimited | Paid API |
