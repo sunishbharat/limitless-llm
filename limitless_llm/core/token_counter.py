@@ -9,9 +9,16 @@ import tiktoken
 from limitless_llm.types import ModelName, TokenCount
 
 # cl100k_base is used as a cross-model approximation. LLaMA 3.x uses a different BPE
-# vocabulary; on technical/symbol-heavy text this can undercount by 5-15%. The 500-token
-# system_overhead constant in pipeline.py is deliberately sized to absorb this error.
+# vocabulary; on technical/symbol-heavy text this can undercount by 5-15%. SYSTEM_OVERHEAD
+# is deliberately sized to absorb this error. Increase to 750 if context-length errors
+# appear in practice on technical content (spec §11).
 _ENCODING = tiktoken.get_encoding("cl100k_base")
+
+# Token budget constants shared across pipeline and chunk-sizing helpers (spec §3.1, §11).
+# SYSTEM_OVERHEAD covers both template boilerplate and cl100k_base approximation error.
+SYSTEM_OVERHEAD: TokenCount = 500
+# Literal tail of the prior chunk carried forward for adjacent-sentence continuity (spec §6.1).
+TAIL_TOKENS: TokenCount = 200
 
 # Staleness threshold: warn if a registry entry is older than this many days.
 _STALENESS_DAYS = 90
@@ -140,6 +147,29 @@ def audit_registry() -> list[dict[str, object]]:
             }
         )
     return results
+
+
+def derive_chunk_size(model_name: ModelName, max_output_tokens: int) -> int:
+    """Return a safe baseline chunk size derived from the model's TPM limit.
+
+    For unlimited providers (paid API, local) returns 6000. For throttled providers
+    uses half the TPM window minus max_output_tokens and SYSTEM_OVERHEAD, floored at
+    200 so StructuralSplitter remains useful.
+
+    The half-window (// 2) reserves capacity for compression calls that share the
+    same 60-second rolling window (spec §4.5).
+
+    Args:
+        model_name: LiteLLM model identifier.
+        max_output_tokens: Per-call output budget in tokens.
+
+    Returns:
+        Baseline chunk size in tokens.
+    """
+    tpm = get_tpm_limit(model_name)
+    if tpm is None:
+        return 6000
+    return max(200, (tpm // 2) - max_output_tokens - SYSTEM_OVERHEAD)
 
 
 class TokenCounter:

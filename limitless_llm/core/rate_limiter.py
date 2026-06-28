@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import structlog
 
+from limitless_llm.exceptions import TPMBudgetExceededError
 from limitless_llm.types import ReservationId, TokenCount
 
 log = structlog.get_logger(__name__)
@@ -63,10 +64,18 @@ class TPMRateLimiter:
                 if current + estimated_tokens <= self.tpm_limit:
                     break
 
-                # If the window is empty but estimated_tokens still exceeds the limit,
-                # a single call's cost exceeds the TPM ceiling - nothing to wait for.
-                # Proceed and let the 429 retry path handle it if the API rejects.
+                # If the window is empty and estimated_tokens still exceeds the limit,
+                # no amount of waiting will help - the call itself is over-budget.
+                # Raise immediately so the pipeline can rechunk rather than booking a
+                # reservation that guarantees a 429 (spec §4.2 updated, see Rev 7).
                 if not self._log:
+                    if estimated_tokens > self.tpm_limit:
+                        raise TPMBudgetExceededError(
+                            model="",
+                            estimated_tokens=estimated_tokens,
+                            rolling_window_tokens=0,
+                            tpm_limit=self.tpm_limit,
+                        )
                     log.warning(
                         "tpm_single_call_exceeds_limit",
                         estimated_tokens=estimated_tokens,
@@ -156,6 +165,22 @@ class TPMRateLimiter:
             return 0
         self._evict_expired()
         return self._window_sum()
+
+    async def release(self, reservation_id: ReservationId) -> None:
+        """Remove a reservation without recording actuals.
+
+        Must be called when a request fails permanently (retry exhaustion, context-length
+        overflow) so the dead reservation does not block the rolling window for up to 60
+        seconds. Not needed after the §4.2 fail-fast path - no reservation was written.
+
+        Args:
+            reservation_id: The UUID returned by wait_if_needed for this reservation.
+        """
+        if self.tpm_limit is None:
+            return
+        async with self._lock:
+            self._log = [e for e in self._log if e.reservation_id != reservation_id]
+        log.debug("tpm_released", reservation_id=reservation_id)
 
     def _evict_expired(self) -> None:
         """Remove entries older than the rolling window. Must be called under lock."""

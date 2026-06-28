@@ -5,8 +5,6 @@ from typing import Any
 
 import litellm
 import structlog
-
-litellm.suppress_debug_info = True
 import tenacity
 
 from limitless_llm.core.rate_limiter import TPMRateLimiter
@@ -14,6 +12,8 @@ from limitless_llm.core.token_counter import TokenCounter, get_context_window
 from limitless_llm.exceptions import ContextLengthExceededError, TPMBudgetExceededError
 from limitless_llm.models.requests import LLMRequest
 from limitless_llm.models.responses import LLMChunk, LLMResponse, UsageStats
+
+litellm.suppress_debug_info = True
 
 log = structlog.get_logger(__name__)
 
@@ -66,6 +66,7 @@ class LiteLLMBackend:
         try:
             response = await self._call_with_retry(request, messages, estimated)
         except litellm.ContextWindowExceededError as exc:  # type: ignore[attr-defined]
+            await self._rate_limiter.release(reservation_id)
             raise ContextLengthExceededError(
                 model=request.model,
                 input_tokens=input_tokens,
@@ -73,6 +74,9 @@ class LiteLLMBackend:
                 context_window=get_context_window(request.model),
                 phase=request.phase or "complete",
             ) from exc
+        except TPMBudgetExceededError:
+            await self._rate_limiter.release(reservation_id)
+            raise
 
         usage = UsageStats(
             prompt_tokens=response.usage.prompt_tokens,

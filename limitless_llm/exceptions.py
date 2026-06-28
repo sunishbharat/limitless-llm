@@ -51,6 +51,19 @@ class ContextLengthExceededError(LimitlessLLMError):
         )
 
 
+class ChunkTooLargeError(LimitlessLLMError):
+    """Raised when a chunk cannot be split to fit within the per-call TPM budget."""
+
+    def __init__(self, text_tokens: int, target_tokens: int) -> None:
+        self.text_tokens = text_tokens
+        self.target_tokens = target_tokens
+        super().__init__(
+            f"Chunk of {text_tokens} tokens cannot be split to fit within "
+            f"{target_tokens} tokens per call even at the 200-token minimum sub-chunk size. "
+            f"Reduce system_prompt length or use a model with a higher TPM limit."
+        )
+
+
 class MergeInputTooLargeError(LimitlessLLMError):
     """Raised when a single merge input alone exceeds the usable context budget."""
 

@@ -9,8 +9,14 @@ import structlog.contextvars
 from limitless_llm.backends.base import LLMBackend
 from limitless_llm.backends.litellm_backend import LiteLLMBackend
 from limitless_llm.core.rate_limiter import TPMRateLimiter
-from limitless_llm.core.token_counter import TokenCounter, get_context_window, get_tpm_limit
-from limitless_llm.exceptions import StartupValidationError
+from limitless_llm.core.token_counter import (
+    SYSTEM_OVERHEAD,
+    TAIL_TOKENS,
+    TokenCounter,
+    get_context_window,
+    get_tpm_limit,
+)
+from limitless_llm.exceptions import ChunkTooLargeError, StartupValidationError
 from limitless_llm.models.config import PipelineConfig
 from limitless_llm.models.requests import LLMRequest
 from limitless_llm.phases.chunker import StructuralSplitter, build_tail
@@ -21,12 +27,11 @@ from limitless_llm.types import TokenCount
 
 log = structlog.get_logger(__name__)
 
-# Token budget constants - see spec §3.1 and §11.
-# system_overhead covers both template boilerplate and cl100k_base approximation error
-# (5-15% undercount on technical text). Increasing to 750 is the first mitigation step
-# if context-length errors are observed in practice.
-_SYSTEM_OVERHEAD: TokenCount = 500
-_TAIL_TOKENS: TokenCount = 200
+# Oldest ledger tokens are dropped once this cap is exceeded. Sized to consume at most
+# 25% of the smallest throttled-provider TPM window (6,000 TPM after Groq correction),
+# leaving room for system prompt, chunk content, and max_output_tokens in the same call.
+# The compressor (spec §6.2) preserves long-term facts; the ledger provides recent context.
+_LEDGER_CAP: TokenCount = 1500
 
 
 def _validate_startup(
@@ -35,13 +40,13 @@ def _validate_startup(
     max_output_tokens: TokenCount,
     context_window: TokenCount,
 ) -> None:
-    total = baseline_chunk_size + max_output_tokens + _TAIL_TOKENS + _SYSTEM_OVERHEAD
+    total = baseline_chunk_size + max_output_tokens + TAIL_TOKENS + SYSTEM_OVERHEAD
     if total > context_window:
         raise StartupValidationError(
             baseline_chunk_size=baseline_chunk_size,
             max_output_tokens=max_output_tokens,
-            tail_tokens=_TAIL_TOKENS,
-            system_overhead=_SYSTEM_OVERHEAD,
+            tail_tokens=TAIL_TOKENS,
+            system_overhead=SYSTEM_OVERHEAD,
             context_window=context_window,
             model=model,
         )
@@ -61,9 +66,59 @@ def _compute_available_chunk_tokens(
         context_window
         - current_ledger_tokens
         - max_output_tokens
-        - _SYSTEM_OVERHEAD
-        - _TAIL_TOKENS
+        - SYSTEM_OVERHEAD
+        - TAIL_TOKENS
         - current_summary_tokens
+    )
+
+
+def _append_ledger(ledger: str, addition: str) -> str:
+    """Append addition to ledger, trimming oldest tokens when the result exceeds _LEDGER_CAP.
+
+    Retains the most recent content. Uses incremental per-word token counting to avoid
+    O(N^2) re-tokenization of the full string on each iteration.
+    """
+    merged = f"{ledger}\n{addition}".strip() if ledger else addition
+    if TokenCounter.count(merged) <= _LEDGER_CAP:
+        return merged
+    words = merged.split()
+    kept: list[str] = []
+    running: TokenCount = 0
+    for word in reversed(words):
+        cost = TokenCounter.count(word)
+        if running + cost > _LEDGER_CAP:
+            break
+        kept.append(word)
+        running += cost
+    # If no words fit (a single word exceeds the cap), keep the last word to preserve
+    # some context rather than returning an empty ledger.
+    return " ".join(reversed(kept)) if kept else words[-1]
+
+
+def _rechunk_to_fit(text: str, target_chunk_tokens: TokenCount) -> list[str]:
+    """Split text into sub-chunks each fitting within target_chunk_tokens.
+
+    Halves the chunk size on each attempt until all sub-chunks fit or the 200-token
+    floor is reached.
+
+    Args:
+        text: Chunk text whose prompt would exceed the TPM window.
+        target_chunk_tokens: Maximum tokens allowed per sub-chunk.
+
+    Returns:
+        List of sub-chunk strings, each within target_chunk_tokens.
+
+    Raises:
+        ChunkTooLargeError: If text cannot be split to fit even at the 200-token floor.
+    """
+    size = max(200, target_chunk_tokens)
+    while size >= 200:
+        subs = StructuralSplitter(chunk_size=size).split(text)
+        if all(TokenCounter.count(s) <= target_chunk_tokens for s in subs):
+            return subs
+        size //= 2
+    raise ChunkTooLargeError(
+        text_tokens=TokenCounter.count(text), target_tokens=target_chunk_tokens
     )
 
 
@@ -128,7 +183,7 @@ async def run_with_chunking_if_needed(
     for idx, chunk_text in enumerate(chunks):
         structlog.contextvars.bind_contextvars(chunk_index=idx, model=model_name, phase="chunk")
 
-        # Compute dynamic budget before this call.
+        # Compute dynamic context-window budget before this call (spec §3.1).
         current_ledger_tokens = TokenCounter.count(ledger)
         current_summary_tokens = compressor.current_summary_tokens
         available = _compute_available_chunk_tokens(
@@ -139,45 +194,89 @@ async def run_with_chunking_if_needed(
             raise RuntimeError(
                 f"Available chunk token budget ({available}) fell below minimum viable size "
                 f"({max_output_tokens}) on chunk {idx}. "
-                f"Reduce max_output_tokens or enable ledger pruning (Phase 2)."
+                f"Reduce max_output_tokens or system_prompt length."
             )
 
-        tail = build_tail(previous_chunk_text, _TAIL_TOKENS)
+        # Compute summary prefix once per chunk (shared across all sub-chunks).
         summary_prefix = (
             f"PRIOR CONTEXT SUMMARY:\n{compressor.current_summary}\n\n"
             if compressor.current_summary
             else ""
         )
-        tail_prefix = f"PRIOR SECTION TAIL:\n{tail}\n\n" if tail else ""
 
-        user_prompt = config.chunk_prompt_template.format(
-            compressed_summary=summary_prefix,
-            tail=tail_prefix,
-            chunk=chunk_text,
-            ledger=ledger or "(empty)",
-        )
+        # Check if the full prompt would exceed the TPM window and split if needed.
+        # Measuring actual prompt overhead (including variable system_prompt) rather than
+        # using fixed constants ensures the check is accurate for large review-mode prompts.
+        tpm_limit = rate_limiter.tpm_limit
+        sub_chunks: list[str]
+        if tpm_limit is not None:
+            empty_user_prompt = config.chunk_prompt_template.format(
+                compressed_summary=summary_prefix,
+                tail="",
+                chunk="",
+                ledger=ledger or "(empty)",
+            )
+            prompt_overhead = (
+                TokenCounter.count(config.system_prompt)
+                + TokenCounter.count(empty_user_prompt)
+                + TAIL_TOKENS
+            )
+            tpm_available_for_chunk = tpm_limit - prompt_overhead - max_output_tokens
+            if TokenCounter.count(chunk_text) > tpm_available_for_chunk:
+                sub_chunks = _rechunk_to_fit(chunk_text, max(200, tpm_available_for_chunk))
+                log.info(
+                    "chunk_rechunked",
+                    chunk_index=idx,
+                    sub_chunk_count=len(sub_chunks),
+                    tpm_available=tpm_available_for_chunk,
+                )
+            else:
+                sub_chunks = [chunk_text]
+        else:
+            sub_chunks = [chunk_text]
 
-        request = LLMRequest(
-            model=model_name,
-            system_prompt=config.system_prompt,
-            user_prompt=user_prompt,
-            max_tokens=max_output_tokens,
-            phase="chunk",
-        )
+        chunk_output = ""
+        for sub_idx, sub_text in enumerate(sub_chunks):
+            tail_src = previous_chunk_text if sub_idx == 0 else sub_chunks[sub_idx - 1]
+            tail = build_tail(tail_src, TAIL_TOKENS)
+            tail_prefix = f"PRIOR SECTION TAIL:\n{tail}\n\n" if tail else ""
 
-        log.info("chunk_call", chunk_index=idx, chunk_tokens=TokenCounter.count(chunk_text))
-        response = await _backend.complete(request)
-        chunk_output = response.content
+            user_prompt = config.chunk_prompt_template.format(
+                compressed_summary=summary_prefix,
+                tail=tail_prefix,
+                chunk=sub_text,
+                ledger=ledger or "(empty)",
+            )
+            request = LLMRequest(
+                model=model_name,
+                system_prompt=config.system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=max_output_tokens,
+                phase="chunk",
+            )
+            log.info(
+                "chunk_call",
+                chunk_index=idx,
+                sub_chunk_index=sub_idx,
+                chunk_tokens=TokenCounter.count(sub_text),
+            )
+            response = await _backend.complete(request)
+            chunk_output = (
+                (chunk_output + "\n" + response.content).strip()
+                if chunk_output
+                else response.content
+            )
+
         chunk_outputs.append(chunk_output)
 
-        # Update ledger by appending this chunk's output.
-        ledger = (ledger + "\n" + chunk_output).strip()
+        # Cap ledger to prevent unbounded growth - drops oldest content when exceeded.
+        ledger = _append_ledger(ledger, chunk_output)
 
         # Update compressed summary for the next chunk.
         structlog.contextvars.bind_contextvars(phase="compression")
         await compressor.update(chunk_output, idx)
 
-        previous_chunk_text = chunk_text
+        previous_chunk_text = sub_chunks[-1]
 
     structlog.contextvars.clear_contextvars()
     log.info("pipeline_merge_start", chunk_count=len(chunk_outputs))
